@@ -425,27 +425,32 @@ class OrchestratorClient:
             return 0
 
         try:
-            # Fetch existing open issues before collecting data so the LLM
-            # receives them as a constraint and won't regenerate duplicates.
-            existing_issues = await asyncio.to_thread(self._store.get_open_summaries)
+            # Only analyse data that arrived since the last run.
+            # On first run, cursor is None so all available data is included.
+            since = await asyncio.to_thread(self._store.get_last_analyzed_at)
+            analysis_start = _now_iso()
 
             data = await self._analyzer.collect_data(
                 agents_filter=agents_filter,
                 workflow_ids_filter=workflow_ids_filter,
+                since=since,
             )
             proposals = await self._analyzer.analyze(
                 data,
                 max_proposals=self._max_proposals,
                 categories_filter=categories_filter,
                 agents_filter=agents_filter,
-                existing_issues=existing_issues,
             )
         except Exception as exc:
             logger.error("Analysis error: %s", exc, exc_info=True)
             return 0
 
+        # Advance the cursor regardless of whether proposals were found,
+        # so the next run only sees data that arrived after this analysis.
+        await asyncio.to_thread(self._store.set_last_analyzed_at, analysis_start)
+
         if not proposals:
-            logger.info("Analysis produced no new proposals")
+            logger.info("Analysis produced no new proposals (cursor advanced to %s)", analysis_start)
             return 0
 
         # Filter out proposals with similar titles to existing non-rejected/completed ones

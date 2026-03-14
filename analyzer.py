@@ -71,13 +71,18 @@ class SystemAnalyzer:
         self,
         agents_filter: Optional[list[str]] = None,
         workflow_ids_filter: Optional[list[str]] = None,
+        since: Optional[str] = None,
     ) -> dict:
         """Gather data from all orchestrator REST APIs and log files.
 
         Args:
-            agents_filter:      If set, restrict agent data and log excerpts to
-                                these agent names (case-insensitive).
+            agents_filter:       If set, restrict agent data and log excerpts to
+                                 these agent names (case-insensitive).
             workflow_ids_filter: If set, restrict workflow data to these task IDs.
+            since:               ISO timestamp cursor. When set, workflow and LLM
+                                 request data are filtered to only include records
+                                 created/started after this timestamp. Log excerpts
+                                 are also filtered to lines after this time.
         """
         data: dict[str, Any] = {}
 
@@ -100,6 +105,24 @@ class SystemAnalyzer:
             _get("/api/v1/cortex/agents", "cortex_agents"),
             _get("/api/v1/cortex/global", "global_memory"),
         )
+
+        # Apply time cursor: drop records older than `since`
+        if since:
+            wf_raw = data.get("workflows") or []
+            if isinstance(wf_raw, list):
+                data["workflows"] = [
+                    w for w in wf_raw
+                    if (w.get("created_at") or w.get("started_at") or "9") >= since
+                ]
+            req_raw = data.get("llm_requests") or []
+            # llm_requests may be a list or a dict with a "requests" key
+            if isinstance(req_raw, dict):
+                req_raw = req_raw.get("requests", [])
+            if isinstance(req_raw, list):
+                data["llm_requests"] = [
+                    r for r in req_raw
+                    if (r.get("created_at") or r.get("timestamp") or "9") >= since
+                ]
 
         # Apply agent filter to agents list
         if agents_filter:
@@ -133,14 +156,15 @@ class SystemAnalyzer:
         except Exception:
             data["settings"] = {}
 
-        # Collect recent log excerpts, optionally filtered by agent name
-        data["agent_logs"] = self._collect_log_excerpts(agents_filter=agents_filter)
+        # Collect recent log excerpts, optionally filtered by agent name and since cursor
+        data["agent_logs"] = self._collect_log_excerpts(agents_filter=agents_filter, since=since)
 
         return data
 
     def _collect_log_excerpts(
         self,
         agents_filter: Optional[list[str]] = None,
+        since: Optional[str] = None,
     ) -> dict[str, list[str]]:
         """Read ERROR/WARNING lines from the most recent logs directory."""
         excerpts: dict[str, list[str]] = {}
@@ -159,6 +183,9 @@ class SystemAnalyzer:
 
         latest_dir = run_dirs[0]
         pattern = re.compile(r"\b(ERROR|WARNING|WARN|CRITICAL)\b", re.IGNORECASE)
+        # Log lines start with a timestamp like "2026-03-14 08:05:51,679"
+        # We only need the first 19 chars (YYYY-MM-DD HH:MM:SS) to compare with since.
+        since_cmp = since[:19].replace("T", " ") if since else None
         af_lower = {a.lower() for a in agents_filter} if agents_filter else None
 
         for log_file in latest_dir.glob("*.log"):
@@ -169,6 +196,11 @@ class SystemAnalyzer:
             try:
                 with log_file.open("r", encoding="utf-8", errors="replace") as f:
                     for line in f:
+                        # Apply time cursor: skip lines before `since`
+                        if since_cmp and len(line) >= 19:
+                            line_ts = line[:19]
+                            if line_ts < since_cmp:
+                                continue
                         if pattern.search(line):
                             lines.append(line.rstrip())
                             if len(lines) >= 50:
@@ -289,7 +321,6 @@ class SystemAnalyzer:
         max_proposals: int = 5,
         categories_filter: Optional[list[str]] = None,
         agents_filter: Optional[list[str]] = None,
-        existing_issues: Optional[list[dict]] = None,
     ) -> list[dict]:
         """Call the LLM proxy to generate improvement proposals from collected data.
 
@@ -313,17 +344,6 @@ class SystemAnalyzer:
             constraints.append(
                 f"Only propose improvements that target these agents: {', '.join(agents_filter)}. "
                 "Ignore issues in other agents."
-            )
-
-        # Inject already-reported open issues so the LLM skips them
-        if existing_issues:
-            existing_lines = "\n".join(
-                f"  - [{item['status']}] ({item['category']}/{item['severity']}) {item['title']}"
-                for item in existing_issues[:50]
-            )
-            constraints.append(
-                f"The following issues are ALREADY REPORTED and open — do NOT propose them again "
-                f"or anything substantially similar:\n{existing_lines}"
             )
 
         constraint_text = ("\n\nAdditional constraints:\n" + "\n".join(f"- {c}" for c in constraints)) if constraints else ""

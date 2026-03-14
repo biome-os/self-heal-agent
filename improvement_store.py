@@ -25,6 +25,10 @@ def _significant_words(text: str) -> set[str]:
 
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS improvements (
     id TEXT PRIMARY KEY,
     analysis_id TEXT NOT NULL,
@@ -177,6 +181,24 @@ class ImprovementStore:
                     completed_at, completed_at,
                     id,
                 ),
+            )
+
+    # ── Analysis cursor ────────────────────────────────────────────────────
+
+    def get_last_analyzed_at(self) -> Optional[str]:
+        """Return the ISO timestamp of the last completed analysis, or None."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key = 'last_analyzed_at'"
+            ).fetchone()
+        return row["value"] if row else None
+
+    def set_last_analyzed_at(self, ts: str) -> None:
+        """Persist the timestamp of the latest completed analysis."""
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_analyzed_at', ?)",
+                (ts,),
             )
 
     def get_open_summaries(self) -> list[dict]:
