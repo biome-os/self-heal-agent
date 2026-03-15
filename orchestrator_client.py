@@ -171,6 +171,14 @@ REGISTRATION_PAYLOAD: dict = {
             "required": False,
             "default": _DEFAULT_PROJECT_ROOT,
         },
+        {
+            "key": "self_heal_enabled",
+            "label": "Self-Heal Enabled",
+            "description": "Master kill-switch. Set to 'false' to pause all scheduled analysis and capability execution.",
+            "type": "string",
+            "required": False,
+            "default": "true",
+        },
     ],
 }
 
@@ -225,6 +233,7 @@ class OrchestratorClient:
         self._current_ws: Any = None
 
         # Settings (defaults)
+        self._enabled: bool = True
         self._analysis_interval_min: int = 60
         self._max_proposals: int = 5
         self._auto_approve_low: bool = False
@@ -290,6 +299,10 @@ class OrchestratorClient:
 
     def _apply_settings(self, settings: dict) -> None:
         """Apply settings dict to local config."""
+        if "self_heal_enabled" in settings:
+            self._enabled = str(settings["self_heal_enabled"]).lower() != "false"
+            logger.info("Self-heal %s", "enabled" if self._enabled else "DISABLED")
+
         if "self_heal_analysis_interval_min" in settings:
             try:
                 self._analysis_interval_min = int(settings["self_heal_analysis_interval_min"])
@@ -393,6 +406,11 @@ class OrchestratorClient:
             "Analysis loop started (interval=%d min)", self._analysis_interval_min
         )
         while not self._shutting_down:
+            if not self._enabled:
+                logger.debug("Self-heal disabled — sleeping 60s before re-check")
+                await asyncio.sleep(60)
+                continue
+
             interval_min = self._analysis_interval_min
             if interval_min <= 0:
                 logger.debug("Analysis disabled (interval=0), sleeping 60s before re-check")
@@ -621,6 +639,8 @@ class OrchestratorClient:
 
     async def _cap_analyze_system(self, ws, input_data: dict) -> tuple[Optional[dict], Optional[str]]:
         """Run an on-demand system analysis with optional filters."""
+        if not self._enabled:
+            return None, "Self-heal is currently disabled — enable it from the dashboard first"
         if self._analyzer is None:
             return None, "Analyzer not initialized"
 
