@@ -794,6 +794,21 @@ class OrchestratorClient:
             },
         ))
 
+    # ── User notification helper ───────────────────────────────────────────
+
+    async def _notify_user(self, reply_context: dict, message: str) -> None:
+        """Send a status message back to the originating user channel."""
+        if not reply_context or not message:
+            return
+        try:
+            await self._http.post(
+                f"{self._base}/api/v1/notify",
+                json={**reply_context, "message": message, "sender_agent_id": self._agent_id},
+                timeout=10.0,
+            )
+        except Exception as exc:
+            logger.warning("_notify_user failed: %s", exc)
+
     # ── Graceful shutdown ─────────────────────────────────────────────────
 
     async def _graceful_shutdown(self) -> None:
